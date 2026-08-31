@@ -1,0 +1,266 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================================================
+//  Restaurant Orders — data model
+//
+//  Conventions used throughout:
+//   * Money is stored as an integer number of cents. Never a float.
+//   * Nothing is ever deleted. Rows are archived or voided with a nullable
+//     timestamp, so "when" comes for free and history survives.
+//   * No referential cascades except refresh tokens. The default (Restrict)
+//     is the guardrail: if code ever tries to delete an order, the database
+//     refuses rather than quietly taking its history with it.
+// ============================================================================
+
+// ---------------------------------------------------------------- enums ----
+
+enum Role {
+  MANAGER
+  WAITER
+}
+
+enum OrderStatus {
+  PLACED
+  ACCEPTED
+  PREPARING
+  READY
+  SERVED
+  CANCELLED
+}
+
+enum OrderEventType {
+  ORDER_CREATED
+  STATUS_CHANGED
+  LINE_ADDED
+  LINE_VOIDED
+  COLLABORATOR_ADDED
+  COLLABORATOR_REMOVED
+  NOTE_ADDED
+  ORDER_ARCHIVED
+  ORDER_RESTORED
+}
+
+// ----------------------------------------------------- accounts and auth ----
+
+model User {
+  id           String   @id @default(uuid(7)) @db.Uuid
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         Role
+  // Staff who leave are deactivated, not deleted — their name must still
+  // appear on the orders and timeline entries they created.
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  primaryOrders    Order[]             @relation("PrimaryWaiter")
+  collaborations   OrderCollaborator[] @relation("CollaboratorUser")
+  collaboratorAdds OrderCollaborator[] @relation("CollaboratorAddedBy")
+  linesCreated     OrderLine[]         @relation("LineCreatedBy")
+  linesVoided      OrderLine[]         @relation("LineVoidedBy")
+  events           OrderEvent[]
+  alertAcks        OrderAlertAck[]
+  refreshTokens    RefreshToken[]
+
+  @@index([role])
+  @@map("users")
+}
+
+// Refresh tokens are stored so that logging out actually invalidates
+// something. Only a hash is kept — for the same reason passwords are hashed:
+// a leaked database should not hand out working sessions.
+model RefreshToken {
+  id        String    @id @default(uuid(7)) @db.Uuid
+  userId    String    @db.Uuid
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+// ------------------------------------------------------------------ menu ----
+
+model MenuItem {
+  id          String    @id @default(uuid(7)) @db.Uuid
+  name        String
+  description String?
+  category    String?
+  priceCents  Int
+  isAvailable Boolean   @default(true)
+  // Archived items disappear from the menu but stay attached to the orders
+  // that already reference them.
+  archivedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  orderLines OrderLine[]
+
+  @@index([archivedAt])
+  @@index([isAvailable])
+  @@index([name])
+  @@map("menu_items")
+}
+
+// ---------------------------------------------------------------- orders ----
+
+model Order {
+  id              String      @id @default(uuid(7)) @db.Uuid
+  tableNumber     Int
+  status          OrderStatus @default(PLACED)
+  primaryWaiterId String      @db.Uuid
+
+  placedAt DateTime @default(now())
+
+  // readyAt and servedAt are denormalised from the timeline. They could be
+  // derived by scanning order_events, but the dashboard asks for "served
+  // today" and a fourteen-day chart, and those should not each require a
+  // scan of the event log.
+  readyAt  DateTime?
+  servedAt DateTime?
+
+  // Soft archive. NULL means the order is in the active queue.
+  archivedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  primaryWaiter User                @relation("PrimaryWaiter", fields: [primaryWaiterId], references: [id])
+  lines         OrderLine[]
+  collaborators OrderCollaborator[]
+  events        OrderEvent[]
+  alertAcks     OrderAlertAck[]
+
+  // Supports the default queue: active orders, newest first.
+  @@index([archivedAt, placedAt])
+  @@index([status])
+  @@index([primaryWaiterId])
+  @@index([tableNumber])
+  @@index([servedAt])
+  @@map("orders")
+}
+
+// The many-to-many half of the waiter relationship. The primary waiter is a
+// column on Order (one-to-many); every additional waiter is a row here.
+model OrderCollaborator {
+  orderId   String   @db.Uuid
+  userId    String   @db.Uuid
+  addedById String   @db.Uuid
+  addedAt   DateTime @default(now())
+
+  order   Order @relation(fields: [orderId], references: [id])
+  user    User  @relation("CollaboratorUser", fields: [userId], references: [id])
+  addedBy User  @relation("CollaboratorAddedBy", fields: [addedById], references: [id])
+
+  // Composite primary key: a waiter can be on an order at most once, and the
+  // database enforces that rather than the application remembering to check.
+  @@id([orderId, userId])
+  @@index([userId])
+  @@map("order_collaborators")
+}
+
+model OrderLine {
+  id      String @id @default(uuid(7)) @db.Uuid
+  orderId String @db.Uuid
+
+  // menuItemId keeps the link to the live menu item, but the name and price
+  // are copied onto the line at the moment it is added. A price change or a
+  // rename tomorrow must not alter what this table was charged today.
+  menuItemId     String @db.Uuid
+  menuItemName   String
+  unitPriceCents Int
+  quantity       Int
+
+  specialInstructions String?
+
+  createdById String   @db.Uuid
+  createdAt   DateTime @default(now())
+
+  // Voiding marks the line. It is never deleted, and a reason is required —
+  // enforced by a database CHECK constraint, not just by the route handler.
+  voidedAt   DateTime?
+  voidReason String?
+  voidedById String?   @db.Uuid
+
+  order     Order    @relation(fields: [orderId], references: [id])
+  menuItem  MenuItem @relation(fields: [menuItemId], references: [id])
+  createdBy User     @relation("LineCreatedBy", fields: [createdById], references: [id])
+  voidedBy  User?    @relation("LineVoidedBy", fields: [voidedById], references: [id])
+
+  events OrderEvent[]
+
+  @@index([orderId])
+  @@index([menuItemId])
+  @@map("order_lines")
+}
+
+// ------------------------------------------------- immutable order history ----
+
+// Append-only. There is no API route that updates or deletes a row here, and
+// a database trigger rejects UPDATE and DELETE outright, so the timeline
+// cannot be rewritten even by a manager or by a stray query.
+model OrderEvent {
+  id      String         @id @default(uuid(7)) @db.Uuid
+  orderId String         @db.Uuid
+  type    OrderEventType
+  actorId String         @db.Uuid
+
+  // Typed columns for the things that get queried or displayed in a fixed
+  // place; a JSON payload for anything a future event type needs to carry
+  // without a migration.
+  fromStatus OrderStatus?
+  toStatus   OrderStatus?
+
+  orderLineId String? @db.Uuid
+  message     String?
+  metadata    Json?
+
+  createdAt DateTime @default(now())
+
+  order     Order      @relation(fields: [orderId], references: [id])
+  actor     User       @relation(fields: [actorId], references: [id])
+  orderLine OrderLine? @relation(fields: [orderLineId], references: [id])
+
+  @@index([orderId, createdAt])
+  @@index([actorId])
+  @@map("order_events")
+}
+
+// ---------------------------------------------------------- slow-order alerts ----
+
+// One row per acknowledgement, not one row per order, and no "is alerting"
+// column anywhere. Whether an order is currently alerting is derived at query
+// time from its status, its placedAt, and the timestamp of its most recent
+// acknowledgement. That is what makes an acknowledged alert come back by
+// itself when the snooze window expires, with no scheduler involved, and what
+// lets the same order be acknowledged repeatedly.
+model OrderAlertAck {
+  id               String   @id @default(uuid(7)) @db.Uuid
+  orderId          String   @db.Uuid
+  acknowledgedById String   @db.Uuid
+  acknowledgedAt   DateTime @default(now())
+
+  order          Order @relation(fields: [orderId], references: [id])
+  acknowledgedBy User  @relation(fields: [acknowledgedById], references: [id])
+
+  @@index([orderId, acknowledgedAt])
+  @@map("order_alert_acks")
+}
