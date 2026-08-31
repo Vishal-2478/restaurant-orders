@@ -1,0 +1,13 @@
+{
+    // What gets compiled and deployed. Inherits everything above, then narrows
+    // to src/ so the seed script and Prisma's config file never reach dist/.
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        "noEmit": false,
+        "rootDir": "src",
+        "outDir": "dist"
+    },
+    "include": [
+        "src/**/*.ts"
+    ]
+}

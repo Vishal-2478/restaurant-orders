@@ -1,0 +1,32 @@
+{
+    // Editor + CI view of the project. Deliberately wider than the build so
+    // that prisma7.config.ts and prisma/seed.ts are type-checked too, but it
+    // emits nothing — see tsconfig.build.json for what actually ships.
+    "compilerOptions": {
+        "target": "ES2022",
+        "module": "nodenext",
+        "moduleResolution": "nodenext",
+        "lib": [
+            "ES2022"
+        ],
+        "strict": true,
+        "esModuleInterop": true,
+        "skipLibCheck": true,
+        "forceConsistentCasingInFileNames": true,
+        "resolveJsonModule": true,
+        "types": [
+            "node"
+        ],
+        "sourceMap": true,
+        "noEmit": true
+    },
+    "include": [
+        "src/**/*.ts",
+        "prisma/**/*.ts",
+        "prisma7.config.ts"
+    ],
+    "exclude": [
+        "node_modules",
+        "dist"
+    ]
+}
