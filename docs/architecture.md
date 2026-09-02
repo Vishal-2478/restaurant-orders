@@ -35,13 +35,14 @@ operation.
 
 ## Backend structure
 
-The backend is organized into routes, services, and database access.
+The backend is organized into routes, services, pure library functions, and database
+access.
 
 ```text
-routes/
-   |
-   v
-services/
+routes/          lib/
+   |         (pure functions,
+   v          no I/O at all)
+services/  <-------'
    |
    v
 prisma/
@@ -51,17 +52,32 @@ PostgreSQL
 ```
 
 Routes handle HTTP-specific work such as parsing requests, validating input with Zod,
-calling the appropriate service, and returning the response.
+calling the appropriate service, and returning the response. They contain no business
+rules of their own.
 
 Services contain the main application logic. This includes checking whether a user can
 act on an order, validating order status transitions, calculating totals, handling
 price snapshots, and creating timeline events.
 
+`lib/` holds the parts of the logic that need nothing from the outside world: the
+status transition table, the slow-order alert rule, the order total calculation, the
+CSV writer, the duration parser, and the password and token helpers. Keeping these
+separate is not just tidiness. A function's dependencies are inherited by everyone who
+imports it, and I found that out the hard way — the total calculation was originally
+written inside the order service, and its first unit test failed immediately, because
+importing that file pulls in the Prisma client, which pulls in environment validation,
+which refuses to start without a database URL. A piece of arithmetic had acquired a
+dependency on a connection string. Moving it into its own import-free file fixed it,
+and that is now the rule I use to decide where a function belongs.
+
 Prisma is used for ordinary database access, where the generated types catch mistakes
 at compile time. The dashboard queries are the exception and are written as SQL by
 hand, because the fourteen-day chart has to include days on which no orders were
 served, which means generating the date series in the database and left joining the
-order counts onto it.
+order counts onto it. An ORM has no way to express "rows that do not exist", and a
+plain `GROUP BY` would return only the days that had activity — so a quiet Tuesday
+would vanish from the chart rather than showing as a zero, and the trend line would be
+misleading rather than merely incomplete.
 
 The API and the migration tooling reach the database over two different connections.
 The running API uses Neon's pooled connection through Prisma's Postgres driver
@@ -69,11 +85,17 @@ adapter, because a web service makes many short queries and a pooler is the righ
 shape for that. Schema migrations use the direct connection instead, because they run
 DDL and expect a persistent session, which a transaction pooler does not provide. The
 pooled string is supplied where the client is constructed; the direct string lives in
-Prisma's config file, which only the CLI reads.
+Prisma's config file, which only the CLI reads. Both use `sslmode=verify-full`, so the
+server's certificate is actually checked rather than the connection merely being
+encrypted.
 
-Authentication and error handling are handled through middleware, while shared
-utilities such as JWT handling, CSV generation, and date-related functions are kept
-separately.
+Authentication and error handling are handled through middleware. The error handler is
+registered last, after every route, because Express only forwards a thrown error to
+handlers registered after the code that threw it. It recognises three cases: an
+application error carrying its own status code and message, a Zod validation failure
+which becomes a `400` with per-field details, and anything else, which is logged
+server-side and returned to the client as a generic `500` so that internal details do
+not leak.
 
 Keeping the order lifecycle rules in a service also makes them easier to test
 independently. For example, the valid and invalid status transitions can be checked
@@ -126,6 +148,40 @@ One example is a waiter changing an order from `ACCEPTED` to `PREPARING`.
 This same server-side approach is used for the other protected operations in the
 application. The UI is not treated as the security boundary.
 
+Steps 3 and 6 are worth separating explicitly, because they answer different questions
+and I tested them separately. Step 3 asks "who are you", and its failure is a `401`.
+Step 6 asks "may you do this to this particular thing", and its failure is a `403`.
+Logging in again fixes the first and cannot fix the second. A waiter holding a
+perfectly valid token gets a `403` on another waiter's order, and the same request with
+the same token succeeds once that waiter has been added as a collaborator — nothing
+about the person changed, the order did.
+
+## Permissions
+
+Authorization happens in two layers, because the brief asks two different kinds of
+question.
+
+The coarse layer is middleware. `requireAuth` establishes who the caller is, and
+`requireRole('MANAGER')` gates the endpoints where the answer depends only on the
+person: creating staff accounts, creating and editing menu items, bulk price changes.
+It never needs to look at the thing being acted on.
+
+The fine layer is a service function, `canActOnOrder(user, order)`. A manager may act
+on any order; a waiter may act on an order only if they are its primary waiter or have
+been added as a collaborator. It takes only the fields it actually needs — who owns the
+order and who is on it — rather than a full Prisma model, which keeps it a pure
+function and makes it testable with plain object literals.
+
+There are two exported forms. `canActOnOrder` returns a boolean, for anywhere that
+wants to decide rather than fail. `assertCanActOnOrder` throws the `403` instead, and
+that is what the services call, so a missing permission check is a missing line of code
+rather than a return value someone forgot to look at.
+
+Waiters can *view* any order but only *act* on their own. That was an ambiguity in the
+brief that I resolved deliberately rather than by accident: a restaurant is a shared
+workspace and staff need to see what is happening at other tables, but changing someone
+else's order is a different matter.
+
 ## Where work happens
 
 Searching, filtering, sorting and pagination of orders all run in the database. The
@@ -134,6 +190,22 @@ page as query parameters, and returns one page of results together with the tota
 number of matches. The browser never receives more orders than it displays, and it
 never filters a list itself. The same applies to the dashboard figures and to the CSV
 export, both of which are aggregated in SQL rather than assembled in the client.
+
+The slow-order alerts follow the same principle but with an important difference: there
+is no alert state stored anywhere to fetch. The endpoint queries for orders that are
+open, not yet Ready, and older than the threshold, brings back each one's most recent
+acknowledgement, and applies a pure function to decide whether it is currently
+alerting. Nothing is written, nothing is scheduled, and an acknowledged alert reappears
+by itself once the snooze window passes.
+
+That query is bounded by the number of orders currently open rather than by the number
+of orders ever placed, which is why it does not get slower as the history grows — the
+opposite of the dashboard aggregates, which are bounded by history and are the first
+thing that would need rolling up at scale.
+
+The bulk menu update deliberately does *not* run in a transaction. The brief requires
+per-item results and says one bad item must never fail the whole batch, which is the
+exact opposite of all-or-nothing semantics.
 
 ## Database and data integrity
 
@@ -150,8 +222,17 @@ no route in the API that updates or deletes a timeline event, and the database i
 has a trigger that rejects `UPDATE` and `DELETE` on that table, so the history cannot
 be rewritten even by a manager, and not by a stray query either.
 
+I verified this rather than assuming it. Connected to Neon as the database owner — a
+higher privilege than any account the application can create — a `DELETE` against
+`order_events` is refused with `ERROR: order_events is append-only; DELETE is not
+permitted on this table`, and an `UPDATE` is refused the same way.
+
 The order status update and its status-change event are written together in a
-transaction so that the order and its history cannot become inconsistent.
+transaction so that the order and its history cannot become inconsistent. The same is
+true of every other mutation: adding a line, voiding a line, adding or removing a
+collaborator, archiving and restoring. In each case the change and the record of the
+change succeed together or not at all, because a history with silent gaps in it is
+worse than no history — you would trust it.
 
 A small number of other rules are also enforced by the database rather than only by
 the API: prices and quantities cannot be negative, table numbers must be positive, and
@@ -164,7 +245,38 @@ constraint makes the invalid state impossible to store at all.
 The price used for an order line is stored on the line when the line is added. This
 means changing the menu item's price later does not change the price of an order line
 that already exists, and a total calculated today still reflects what the customer was
-actually charged.
+actually charged. This is easy to demonstrate: change a menu item's price through the
+API and re-fetch an order that already contains it, and the order's total does not
+move.
+
+## Testing
+
+There are thirty-six unit tests, and they cover the parts of the system where the rules
+live rather than the plumbing that carries them.
+
+- **The status transition table** — every legal move, every illegal one, the terminal
+  states, and the exact wording of the rejection reasons.
+- **The access policy** — manager, primary waiter, collaborator, and an unrelated
+  waiter, with and without collaborators present.
+- **Order totals** — multiplication by quantity, summing, excluding voided lines, and
+  a case that would drift if the arithmetic were done in floating point.
+- **The alert rule** — the threshold boundary, the snooze window, the re-arm, repeated
+  acknowledgement, and a stale acknowledgement failing to suppress a fresh alert.
+- **The CSV writer** — quoting, embedded quotes and newlines, empty values, and
+  neutralising strings that a spreadsheet would otherwise execute as a formula.
+
+These are all pure functions, which is what makes them worth testing at this level:
+they can be called directly with plain values, and the alert tests in particular can
+simulate "twenty-six minutes later" without waiting for it.
+
+The endpoints themselves were verified by hand against the real database — including
+the cross-account `403`, the same request succeeding after a collaborator was added,
+the `409` with a readable reason, refresh-token rotation and reuse, logout revocation,
+per-item bulk results, and the append-only trigger.
+
+Two bugs found this way could not have been caught by unit tests at all: the transaction
+timeout on a cold-started database, and a timezone error in the dashboard aggregates
+that returned a plausible but wrong number. Both are recorded in `decisions.md`.
 
 ## Things I did not build
 
@@ -186,3 +298,8 @@ I kept the implementation focused on the required functionality.
   goals.
 * **Password reset and email flows.** The application uses manager-created and seeded
   demo accounts, so a complete email-based account recovery flow was not included.
+* **Integration tests over HTTP.** Supertest is installed and the app is exported
+  without calling `listen()` specifically so that it could be imported into tests. With
+  the time available I chose to unit test the rules thoroughly and verify the endpoints
+  by hand, rather than the other way round. If I had another few hours this is the
+  first thing I would add.

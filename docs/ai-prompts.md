@@ -1,5 +1,16 @@
 # AI prompts
 
+I used an AI assistant throughout this project. The working arrangement was that it
+wrote and verified code and I typed it in myself, so that I would be able to explain
+every line afterwards, and so that I was the one running the commands and reading the
+errors.
+
+The entries below are the exchanges that actually changed something. Some are prompts
+that produced good answers; several are prompts whose first answer was wrong, and those
+are the more useful ones to record.
+
+---
+
 ## Understanding the brief and choosing a stack
 
 ### Prompt
@@ -157,3 +168,135 @@ difference between them was easy to miss.
 
 I also declined the upgrade prompt to Prisma 8.0.0-rc, on the grounds that taking a
 major version release candidate a few days before a deadline has no upside.
+
+The part of this prompt that did the work was "check rather than assume". Asking for
+verification rather than an answer from memory is now how I phrase anything
+version-specific, and it is the reason the second answer was right.
+
+---
+
+## Building the order lifecycle
+
+### Prompt
+
+Now write the order service: creating an order, adding lines with the price snapshot,
+voiding a line with a required reason, the status transitions, collaborators, archive
+and restore, and the timeline events.
+
+Two rules. Every mutation and the timeline event that records it must be written in the
+same transaction, so the order and its history can never disagree. And anything that is
+a rule rather than plumbing — the transition table, the permission check, the total
+calculation — should be a pure function in its own file, so I can unit test it without
+a database.
+
+Compile and run everything before you give it to me.
+
+### What you got
+
+The service, the routes, and a set of unit tests. The transition rules came back as a
+lookup table rather than a chain of `if` statements, which I had not thought to ask for
+but immediately preferred — the whole lifecycle is visible in eight lines and can be
+checked against the brief by reading it, and because the table is typed as a complete
+record over the status enum, TypeScript refuses to compile if a status is ever added
+without saying what may follow it.
+
+The transition checker returns a result object rather than throwing, so the same
+function can serve the route that needs a `409` with a reason, the tests that need a
+value to assert on, and eventually the frontend that needs to know which buttons to
+disable.
+
+### What you corrected
+
+Two things, both found by the instruction to run the code first rather than by reading
+it.
+
+The total calculation was originally written inside the order service. Its unit test
+failed on the very first run, because importing that file pulls in the Prisma client,
+which pulls in the environment validation, which calls `process.exit` when
+`DATABASE_URL` is not set. A piece of arithmetic could not be tested without a database
+connection string. It moved into its own file with no imports at all, and I now use
+that as the test for where a function belongs: a function's dependencies are inherited
+by everyone who imports it.
+
+The second was in the menu query parameters. `z.coerce.boolean()` looks like the
+obvious way to read `?includeArchived=false` from a query string, and it is wrong —
+coercion is just `Boolean(value)`, and every non-empty string is truthy, so the string
+`"false"` becomes `true`. The parameter silently meant the opposite of what it said.
+Replaced with an explicit `z.enum(['true','false'])` and a transform.
+
+---
+
+## The dashboard, and a bug that looked like nothing
+
+### Prompt
+
+Write the dashboard aggregates. The fourteen-day chart has to include days where
+nothing was served, and "today" has to mean today in the restaurant's timezone, not in
+UTC. Do not reason about the timezone arithmetic — set up a real PostgreSQL database,
+seed it with orders that cross the boundary, and show me the actual numbers.
+
+### What you got
+
+The four aggregate queries, and a demonstration I would not have thought to ask for if
+I had not insisted on the numbers.
+
+Prisma stores timestamps in UTC, and Kolkata is UTC+05:30, so an order served at half
+past midnight local time is stored as seven in the evening the day before. Run against
+seeded data that deliberately straddled that boundary, the timezone-aware query
+returned **2** orders served today and the naive `servedAt::date = current_date`
+version returned **1**.
+
+The naive version does not error. It returns a plausible number that is quietly wrong,
+and the only way anyone would notice is by comparing the dashboard against the till.
+
+The fourteen-day chart demonstrated the same point differently: a plain `GROUP BY`
+returned two rows for the two days that had activity, where the `generate_series`
+version returned all fourteen with twelve zeroes. A chart built on the first version
+would not have shown a quiet Tuesday as low — it would have removed Tuesday and drawn
+Monday next to Wednesday.
+
+### What you corrected
+
+Nothing in the answer, but the prompt itself is the correction. My earlier prompts
+asked for code; this one asked for evidence. Both of these bugs would have shipped and
+neither would have produced an error message, and no unit test I would have thought to
+write would have caught either, because both are about what the database does with real
+timestamps rather than about what my functions do with their arguments.
+
+---
+
+## A production bug that the tests could not have found
+
+### Prompt
+
+The order list endpoint threw `P2028 Unable to start a transaction in the given time`
+against the deployed database. Explain what actually happened before suggesting a fix —
+I do not want to just raise a number until the error goes away.
+
+### What you got
+
+Two causes that had stacked up. Prisma waits two seconds by default to acquire a slot
+for an interactive transaction, and Neon's free tier suspends a database that has been
+idle and takes several seconds to wake. So the first request after a quiet period was
+asking for a transaction before there was a database awake to provide one, waiting two
+seconds, and giving up. The endpoint returned a 500 instead of a page of orders.
+
+### What you corrected
+
+The first suggestion was to raise the timeouts, and I did raise them — the transactions
+that genuinely have to be atomic, every order mutation together with its timeline
+event, now have limits generous enough to survive a cold start.
+
+But that treats the symptom. The question the prompt was really asking was why a
+read-only list query needed a transaction at all. It had one because I had wrapped the
+page query and its `COUNT(*)` together so that the count could never describe a
+different set of rows than the page. That is a real guarantee, and on this endpoint it
+is worth very little — the worst case is a total computed a few milliseconds before the
+page, on a list the user re-fetches as soon as they click anything. What it cost was the
+endpoint working at all on the first request after an idle period, which on a free tier
+that a reviewer opens once is close to every request that matters.
+
+So the transaction came out of the list query and stayed everywhere it earns its keep.
+This is recorded as the second reversed decision in `decisions.md`, and it is the
+clearest example in the project of something thirty-six passing unit tests could never
+have found, because it only appears against a real database that has been asleep.

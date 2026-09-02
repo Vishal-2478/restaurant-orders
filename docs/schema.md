@@ -7,7 +7,19 @@ or voided using a nullable timestamp, which also records when it happened.
 Table names are snake_case. Column names are left as Prisma generates them, in
 camelCase, so that a column has the same name in the SQL as it does in the TypeScript.
 The cost is that raw SQL has to double-quote them, because Postgres lowercases
-unquoted identifiers.
+unquoted identifiers. That cost is real and I have paid it — every one of the dashboard
+queries and every ad-hoc query I have run against Neon writes `"servedAt"` rather than
+`servedAt`, and forgetting the quotes produces a "column does not exist" error rather
+than anything that hints at the cause.
+
+Every primary key is a UUID version 7 rather than an auto-incrementing integer or a
+version 4 UUID. Sequential integers leak information — a reviewer who signs up and is
+given id 4 has learned how many accounts exist, and an order numbered 1,203 tells a
+competitor roughly how much business the restaurant has done. Version 4 UUIDs solve
+that but are entirely random, so consecutive inserts scatter across the index. Version 7
+puts a millisecond timestamp in the leading bits, so the values still cannot be guessed
+but they sort chronologically, rows created together sit together in the index, and
+ordering by id is approximately ordering by creation time.
 
 ## Tables
 
@@ -139,6 +151,10 @@ There is no "is alerting" or "acknowledged" column anywhere in the schema. This 
 explained under denormalisation below, because it is the design decision I spent the
 most time on.
 
+Note that this table has no unique constraint on `orderId`. That is deliberate: one
+order accumulates as many acknowledgement rows as it is acknowledged times over an
+evening, and the query only ever reads the most recent one.
+
 ## One-to-many versus many-to-many
 
 **One-to-many**
@@ -183,6 +199,14 @@ those two relationships.
   set and the reason is not blank after trimming
 - A trigger on `order_events` that raises on any `UPDATE` or `DELETE`
 - `NOT NULL` throughout
+
+I tested the trigger rather than assuming it worked. Connected to Neon through its SQL
+editor as the database owner — a higher privilege than any account the application is
+capable of creating — `DELETE FROM order_events WHERE "orderId" = '...'` is refused
+with `ERROR: order_events is append-only; DELETE is not permitted on this table
+(SQLSTATE 23001)`, and an `UPDATE` on the same rows is refused the same way. Goal 9 says
+the history cannot be edited or deleted "including by managers"; a manager is not
+actually the hardest case, the database owner is, and the constraint holds there.
 
 **Enforced by the application**
 
@@ -287,6 +311,13 @@ rows per order, so tens of millions a year. Reading one order's timeline stays f
 because of the `(orderId, createdAt)` index, but the table itself becomes the largest
 thing to back up and vacuum. Monthly partitioning, or moving events older than a year
 to cold storage, would be the move.
+
+**What is already mitigated:** the total match count on the order list originally ran
+inside the same transaction as the page query, so the two could never disagree. That had
+to be removed for a different reason — Neon suspends idle databases, and an interactive
+transaction on a cold start failed outright — but the effect at scale is the same
+direction of travel: the exact count is the expensive part of that endpoint and is the
+first thing that should stop being exact.
 
 **What does not break, and why that matters:** the slow-order alert query. It looks
 expensive because it joins to the acknowledgement history, but it only ever considers
