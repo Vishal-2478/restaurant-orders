@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireAuth, requireRole } from '../middleware/auth';
+import { bulkUpdateMenuItems } from '../services/bulkMenuService';
 import {
     archiveMenuItem,
     createMenuItem,
@@ -50,10 +51,38 @@ const updateSchema = createSchema.partial().refine(
 
 const idParamSchema = z.object({ id: z.uuid() });
 
+const bulkChangeSchema = z.object({
+    priceCents: z.int().min(0).optional(),
+    isAvailable: z.boolean().optional(),
+});
+
+const bulkSchema = z.object({
+    // Goal 7 supports both shapes: one value applied to every item, and
+    // per-item values. An item's own value wins over the shared one.
+    applyToAll: bulkChangeSchema.optional(),
+    items: z
+        .array(bulkChangeSchema.extend({ id: z.uuid() }))
+        .min(1)
+        .max(200),
+});
+
 menuRouter.get('/', async (req, res) => {
     const query = listQuerySchema.parse(req.query);
     const items = await listMenuItems(query);
     res.json({ items });
+});
+
+/**
+ * Goal 7: update several items at once and report per item what happened.
+ * Declared before '/:id' so that "bulk" is not read as an item id.
+ */
+menuRouter.post('/bulk', requireRole('MANAGER'), async (req, res) => {
+    const body = bulkSchema.parse(req.body);
+    const result = await bulkUpdateMenuItems(body);
+
+    // 200, not 207. Every item's outcome is in the body, and the request itself
+    // succeeded — reporting a rejected item is the endpoint working, not failing.
+    res.json(result);
 });
 
 menuRouter.get('/:id', async (req, res) => {

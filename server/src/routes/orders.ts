@@ -2,6 +2,9 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth';
 import { unauthorized } from '../lib/errors';
+import { acknowledgeAlert, listSlowOrderAlerts } from '../services/alertService';
+import { listOrders } from '../services/orderQueryService';
+import { exportOrdersCsv } from '../services/exportService';
 import {
     addCollaborator,
     addLine,
@@ -60,7 +63,73 @@ const statusSchema = z.object({
 const collaboratorSchema = z.object({ userId: z.uuid() });
 const noteSchema = z.object({ message: z.string().trim().min(1).max(500) });
 
+const boolFromQuery = z
+    .enum(['true', 'false'])
+    .transform((value) => value === 'true')
+    .optional();
+
+const statusEnum = z.enum([
+    'PLACED',
+    'ACCEPTED',
+    'PREPARING',
+    'READY',
+    'SERVED',
+    'CANCELLED',
+]);
+
+const exportQuerySchema = z.object({ day: z.coerce.date().optional() });
+
+const listQuerySchema = z.object({
+    // Exact match: tableNumber is an integer so that sorting by table is
+    // numerically correct. The cost, accepted and documented, is that this is
+    // not a substring search.
+    tableNumber: z.coerce.number().int().min(1).optional(),
+    // Repeatable: ?status=PLACED&status=ACCEPTED
+    status: z.union([statusEnum, z.array(statusEnum)]).optional(),
+    waiterId: z.uuid().optional(),
+    placedFrom: z.coerce.date().optional(),
+    placedTo: z.coerce.date().optional(),
+    mineOnly: boolFromQuery,
+    includeArchived: boolFromQuery,
+    sortBy: z.enum(['placedAt', 'status', 'tableNumber']).optional(),
+    sortDirection: z.enum(['asc', 'desc']).optional(),
+    page: z.coerce.number().int().min(1).optional(),
+    pageSize: z.coerce.number().int().min(1).max(100).optional(),
+});
+
 // ---------------------------------------------------------------- reading ----
+
+/**
+ * Goal 6: search, filter, sort and paginate. Everything happens in the
+ * database; the response carries the total match count alongside one page.
+ */
+ordersRouter.get('/', async (req, res) => {
+    const query = listQuerySchema.parse(req.query);
+    const status = query.status
+        ? Array.isArray(query.status)
+            ? query.status
+            : [query.status]
+        : undefined;
+
+    res.json(await listOrders(actorFrom(req), { ...query, status }));
+});
+
+/** Goal 10: the alerts list, and the number for the nav badge. */
+ordersRouter.get('/alerts', async (_req, res) => {
+    const alerts = await listSlowOrderAlerts();
+    res.json({ alerts, count: alerts.length });
+});
+
+/** Goal 7: CSV export of a day's orders. Defaults to today. */
+ordersRouter.get('/export.csv', async (req, res) => {
+    const day = exportQuerySchema.parse(req.query).day ?? new Date();
+    const csv = await exportOrdersCsv(day);
+    const stamp = day.toISOString().slice(0, 10);
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="orders-${stamp}.csv"`);
+    res.send(csv);
+});
 
 /** Goal 5: every order where I am primary waiter or a collaborator. */
 ordersRouter.get('/mine', async (req, res) => {
@@ -117,6 +186,11 @@ ordersRouter.post('/:id/archive', async (req, res) => {
 ordersRouter.post('/:id/restore', async (req, res) => {
     const { id } = idParam.parse(req.params);
     res.json(await restoreOrder(actorFrom(req), id));
+});
+
+ordersRouter.post('/:id/alerts/ack', async (req, res) => {
+    const { id } = idParam.parse(req.params);
+    res.status(201).json(await acknowledgeAlert(actorFrom(req), id));
 });
 
 ordersRouter.post('/:id/notes', async (req, res) => {
