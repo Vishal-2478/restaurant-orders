@@ -5,6 +5,7 @@ import { env } from './env';
 import { authRouter, usersRouter } from './routes/auth';
 import { errorHandler, notFoundHandler } from './middleware/error';
 import { menuRouter } from './routes/menu';
+import { ordersRouter } from './routes/orders';
 
 export function createApp() {
     const app = express();
@@ -25,6 +26,7 @@ export function createApp() {
     app.use('/api/auth', authRouter);
     app.use('/api/users', usersRouter);
     app.use('/api/menu', menuRouter);
+    app.use('/api/orders', ordersRouter);
 
     // Order matters: the 404 handler catches anything no route claimed, and the
     // error handler must be registered last so every thrown error reaches it.
