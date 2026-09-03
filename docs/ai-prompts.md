@@ -300,3 +300,131 @@ So the transaction came out of the list query and stayed everywhere it earns its
 This is recorded as the second reversed decision in `decisions.md`, and it is the
 clearest example in the project of something thirty-six passing unit tests could never
 have found, because it only appears against a real database that has been asleep.
+
+---
+
+## The frontend authentication layer
+
+### Prompt
+
+Now the frontend. Before any screen, build the layer everything sits on: the fetch
+wrapper, where the tokens are kept, the refresh-on-401 behaviour, the auth context and
+the route guard.
+
+Two things I want reasoned about rather than assumed. Where each token should live and
+why they should not both live in the same place. And what happens when several requests
+fail with `401` at the same moment, given that my refresh tokens rotate.
+
+Compile it before giving it to me.
+
+### What you got
+
+The access token in a module-level variable and the refresh token in `localStorage`, with
+the reasoning I had asked for: the access token cannot be revoked, so it is kept where it
+is hardest to reach and given a short life; the refresh token is revocable and rotates,
+so the risk of storing it is one that can be detected and undone.
+
+The concurrency question turned out to be the important one, and I would not have thought
+to ask it if I had not been told earlier that rotation makes a stolen token usable only
+once. Three requests failing together would each call `/api/auth/refresh`; the first
+would succeed and revoke the token; the other two would present a token that had died a
+millisecond earlier and be rejected — clearing the session and throwing the user out for
+no reason. It appears only under concurrency, only sometimes, and looks exactly like a
+broken backend.
+
+The fix is that all callers await a single in-flight promise.
+
+### What you corrected
+
+Nothing in the answer. What changed was my sense of where the risk in this project
+actually is. I had been thinking of the frontend as the easy half — screens rendering
+JSON — and this is the one part of it with a real trap in it. So I built the whole auth
+layer and tested it, including refreshing the page to confirm the session survives, before
+building a single screen on top of it.
+
+---
+
+## The order list, and a lint rule that improved the code
+
+### Prompt
+
+Build the order list. Every filter, the sort, and the page must be sent to the server —
+the brief says explicitly not to load every order into the browser and filter there — and
+the response has to show a total match count alongside one page.
+
+I would also like the filters to survive a page refresh and work with the back button.
+
+### What you got
+
+The filters kept in the URL with `useSearchParams` rather than in component state, which
+gives the back button and refresh behaviour I asked for, and two things I had not thought
+of: a filtered view becomes a link that can be pasted to someone else, and the query
+string can be used as part of the cache key.
+
+That last point is the one I would now lead with. Because the query string is part of the
+key, changing a filter changes the cache entry, which means a new request to the server.
+"Filtering happens on the server" stops being a convention someone has to remember and
+becomes the only thing the code is capable of doing.
+
+### What you corrected
+
+My linter rejected the first version. The dependency array of the memo contained
+`statuses.join(',')`, and `react-hooks/exhaustive-deps` only accepts plain identifiers,
+not function calls.
+
+The obvious fix would have been to compute that string into a variable first. The better
+fix, which is what we did, was to read every value *inside* the memo directly from
+`searchParams` and depend on `searchParams` alone. One dependency, and the request can no
+longer disagree with the URL, because both read from the same source.
+
+I have started treating that lint rule as a design hint rather than an obstacle. It was
+asking "what does this actually depend on?", and the honest answer was one thing, not
+eleven.
+
+---
+
+## Demo data, and why it is not a formality
+
+### Prompt
+
+The application works but it looks empty — one order, a flat chart, an empty alerts page.
+Extend the seed script so the deployed app demonstrates all ten goals on first login.
+
+I specifically want the alerts page to be populated the moment someone signs in, including
+the case where an alert has already come back after being acknowledged, because that is
+the hardest part of Goal 10 and it is the part nobody will wait around to see.
+
+### What you got
+
+Thirty-one orders: eight covering every status with collaborators, a voided line and
+notes, and twenty-three spread across the previous thirteen days so the chart has a shape.
+
+Three details I would not have specified myself, and all three are the difference between
+demo data and a demonstration:
+
+Two days in the history are deliberately left empty, so the fourteen-day chart shows real
+zeroes. If every day had orders, the fact that the query includes empty days would be
+invisible.
+
+Three orders are backdated past the fifteen-minute threshold, so alerts are populated
+immediately — and one of them carries an acknowledgement from fourteen minutes ago, which
+with a ten-minute snooze means it has already re-armed and displays as "Returned" on first
+load.
+
+Every seeded line copies the price and name from the menu item exactly as the running code
+does, and every order's timeline is written event by event through the real transition
+path. Seeded data has to obey the same rules as real data, or the price-snapshot
+demonstration would be a lie and the timeline would not look like something that happened.
+
+### What you corrected
+
+Nothing in the output. The prompt is the entry: I had been treating seed data as a chore
+and this reframed it as part of the deliverable. An empty alerts page is indistinguishable
+from a broken one, and a reviewer with fifteen minutes judges what is on the screen rather
+than what the code is capable of.
+
+It also turned into an unplanned demonstration of the alert design. An order that had been
+seeded as too recent to alert appeared in the alerts list an hour later, without anything
+running — no job, no timer, nothing written. A subtraction that returned false now returns
+true. That is the clearest evidence I have that "derive, don't store" was the right call,
+and I found it by leaving the tab open.

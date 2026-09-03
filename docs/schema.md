@@ -280,6 +280,37 @@ lines every time it is needed rather than cached on the order. Lines can be adde
 voided while an order is open, so a stored total would be one more thing to keep
 correct, and summing a handful of rows is cheap.
 
+
+## What the frontend actually sees
+
+The tables above are not the shapes the browser receives, and the difference is
+deliberate in three places.
+
+**A user never arrives with a password hash.** Every response that includes a person —
+the login response, `/me`, the primary waiter on an order, the actor on a timeline entry
+— goes through one function that returns `id`, `email`, `name` and `role` and nothing
+else. The hash exists in the table and does not leave the service layer.
+
+**An order arrives with a total that no table contains.** `totalCents` is summed from
+the non-voided lines each time an order is read. The browser does not add prices up, and
+there is no column to fall out of date. This is the denormalisation I chose *not* to do,
+and it is why the CSV export and the screen can never disagree: both call the same
+function.
+
+**Nothing about alerts is fetched, because nothing about alerts is stored.** The alerts
+endpoint returns a computed list — table number, minutes open, whether it has re-armed —
+assembled from the order timestamps and the most recent acknowledgement row. There is no
+alert record to read, and the frontend has no way to ask for one.
+
+The general shape is that the API returns what a screen needs to render, computed from
+the tables, rather than the tables themselves. That is what keeps the browser free of
+business logic: it cannot recalculate a total incorrectly if it never receives the
+ingredients, and it cannot show a stale alert flag if no such flag exists.
+
+One consequence worth noting for anyone reading the frontend code: `web/src/lib/types.ts`
+describes these *response* shapes, not the tables. `OrderDetail` has `totalCents` and a
+`collaborators` array with the user object attached; the `orders` table has neither.
+
 ## What would break first at 100x the data
 
 Assume a busy restaurant at roughly three hundred orders a day. A hundred times that

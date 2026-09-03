@@ -5,7 +5,7 @@ Managers keep the menu, prices and availability current; waiters place and track
 orders from table to kitchen and back, with an auditable history and alerts for
 orders that have been sitting too long.
 
-**Live application:** _to be added_
+**Live application:** [Link](https://vishal-restaurant-orders.vercel.app)
 **Design documents:** see [`docs/`](./docs)
 
 ## Stack

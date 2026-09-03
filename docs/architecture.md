@@ -101,6 +101,131 @@ Keeping the order lifecycle rules in a service also makes them easier to test
 independently. For example, the valid and invalid status transitions can be checked
 without making an HTTP request or connecting to the database.
 
+
+## Frontend structure
+
+The React application is a single-page app built with Vite. Vercel serves it as static
+files; it has no server of its own, no database access and no secrets. The only
+configuration it receives is `VITE_API_URL`, the address of the API, which is baked into
+the bundle at build time.
+
+```text
+src/
+  lib/          api.ts        the fetch wrapper, tokens, refresh, downloads
+                types.ts      the shapes the API returns
+                format.ts     money and dates
+                queries.ts    query-string building and fetchers
+                orderStatus.ts a copy of the transition table, for the UI only
+                alerts.ts     the shared alerts query key and poll interval
+  auth/         AuthContext   who is signed in; login, logout, session restore
+                RequireAuth   the route guard
+  components/   Layout, StatusBadge, OrderTimeline, ServedPerDayChart
+  pages/        Login, Orders, NewOrder, OrderDetail, Menu, Dashboard, Alerts
+```
+
+The division is the same idea as the backend's: `lib/` holds things with no knowledge of
+React, `components/` and `pages/` hold the parts that draw.
+
+### The API client
+
+Every request in the application goes through one function in `lib/api.ts`. It attaches
+the access token, parses the API's error envelope into a typed `ApiError`, and handles
+the two cases that would otherwise be repeated in every screen: a `204 No Content` with
+no body to parse, and a `401` meaning the access token has expired.
+
+On a `401` it refreshes the token once and replays the original request, so a user
+working through a fifteen-minute boundary never notices. A second failure clears the
+session and hands control to a callback that the auth context registers — the API layer
+deliberately knows nothing about React or routing, it only announces that the session is
+gone.
+
+The one piece of genuine subtlety is that concurrent refreshes share a single promise.
+Because refresh tokens rotate, three requests failing at the same moment would otherwise
+each call `/api/auth/refresh`: the first would succeed and revoke the token, and the
+other two would present a token that had died a millisecond earlier and be rejected,
+logging the user out for no reason. It is a bug created by rotation, it only appears
+under concurrency, and it is prevented by six lines that make everyone await the same
+in-flight refresh.
+
+### Where the tokens live
+
+The access token is held in a module-level variable — memory only, never `localStorage`.
+It is a bearer credential, so anything that can read it can act as the user for fifteen
+minutes, and a value in `localStorage` is readable by any script on the page at any
+later time. The cost of keeping it in memory is that a page reload destroys it.
+
+The refresh token is in `localStorage`, because the alternative is signing the user out
+on every refresh. That is an acceptable risk for the opposite reason: it is revocable and
+it rotates, so a stolen refresh token works exactly once and its use logs the real owner
+out. The untraceable credential is kept where it is hardest to reach; the traceable one
+is the one that persists.
+
+On boot the app therefore has no access token. If a refresh token survived, it is
+exchanged for a new pair and the user is reloaded before anything renders. That produces
+a third state beyond "signed in" and "signed out" — **loading** — and the route guard has
+to respect it. Collapsing loading into signed-out would redirect every page refresh to
+the login screen and then back again.
+
+### Server state versus client state
+
+Server data is treated as a cache of something that lives elsewhere, not as component
+state, and TanStack Query manages it. Which dialog is open and what is typed in a field
+are `useState`; the orders, the menu, the dashboard and the alerts are queries with keys
+— `['order', id]`, `['orders', queryString]`, `['alerts']`.
+
+Two things follow that are worth naming. A mutation can invalidate `['order', id]`,
+`['orders']` and `['alerts']` without knowing which components are currently showing any
+of them. And because the alerts badge in the navigation and the alerts page use the same
+key, they are deduplicated into one request and cannot disagree.
+
+Mutations refetch rather than patching the cache by hand, because the server computes
+things the client cannot: the recalculated total, the new timeline event with its server
+timestamp, the denormalised `readyAt`. Updating the cache locally would mean
+reimplementing server logic in the browser, which is the same mistake as filtering in the
+browser wearing a different hat.
+
+### Filters live in the URL
+
+The order list keeps every filter in the query string rather than in component state, and
+the query string is part of the TanStack Query cache key. Three things follow: the back
+button works, a filtered view is a link that can be pasted to a colleague, and — most
+usefully — changing a filter *is* a new server request, because it changes the cache key.
+Server-side filtering is not a convention someone has to remember; it is the only thing
+the code can do.
+
+### What the interface enforces, and what it does not
+
+The frontend hides manager-only controls from waiters, and renders only the status
+buttons that the transition table permits from the current status. Neither of these is
+security. A waiter who forced every control to appear would receive `403` on each
+request, and a client that sent an illegal transition would receive `409`. The purpose is
+to avoid offering an action that will be refused, not to prevent it.
+
+For the same reason the client carries its own copy of the status transition table. It is
+duplicated deliberately: the server's copy is the rule and re-checks every request, this
+copy is a hint used to decide which buttons exist. If they drift, the server wins and the
+user sees the server's own explanation — degraded, never wrong. The alternative was
+asking the server which moves are legal, which is a round trip to render a button, for an
+answer that is a pure function of a value the client already holds.
+
+When a request is refused, the message shown to the user is the server's own sentence,
+unchanged. Goal 4 asks the server to explain why an illegal status change was rejected,
+and its message names the actual next legal step; substituting generic wording in the
+interface would discard the requirement.
+
+### Deployment shape, and its two traps
+
+The build produces one HTML file and a bundle. Because React Router invents paths like
+`/orders/:id` in the browser, those paths do not exist on disk, so `vercel.json` rewrites
+every request to `index.html` and lets the application resolve the route. Without it,
+opening an order and pressing refresh returns a 404 — and a deep link is the first thing
+anyone tries when a URL is shared.
+
+The second trap is that `CORS_ORIGIN` on the API must name the deployed frontend. Until
+it does, the site loads and every request is blocked by the browser with nothing in the
+server log, because the request never leaves the browser. It is the failure that looks
+least like what it is.
+
 ## Request flow
 
 One example is a waiter changing an order from `ACCEPTED` to `PREPARING`.
@@ -278,6 +403,16 @@ Two bugs found this way could not have been caught by unit tests at all: the tra
 timeout on a cold-started database, and a timezone error in the dashboard aggregates
 that returned a plausible but wrong number. Both are recorded in `decisions.md`.
 
+The frontend has no automated tests, and I would rather say so than imply otherwise. It
+was verified by hand against the running API: signing in and refreshing the page to
+confirm the session survives, watching the network panel to confirm that every filter
+control produces a new server request, changing a menu price and confirming an existing
+order's total does not move, being refused on another waiter's order and then allowed
+after being added as a collaborator, and driving an order through every legal and
+illegal status change. If I had more time the first tests I would write are the ones for
+the two behaviours most likely to regress silently: that a `403` renders the server's
+message, and that a void cannot be submitted without a reason.
+
 ## Things I did not build
 
 I kept the implementation focused on the required functionality.
@@ -303,3 +438,16 @@ I kept the implementation focused on the required functionality.
   the time available I chose to unit test the rules thoroughly and verify the endpoints
   by hand, rather than the other way round. If I had another few hours this is the
   first thing I would add.
+* **Frontend tests.** None. See the testing section above for what I verified by hand
+  instead, and which two tests I would write first.
+* **Optimistic updates.** Every mutation waits for the round trip, so on a slow
+  connection a status change feels sluggish. TanStack Query supports optimistic updates
+  with rollback; I chose correctness and simplicity over perceived speed, which is the
+  right default but is worth revisiting for the status buttons specifically.
+* **A React error boundary.** A render-time exception in one component currently blanks
+  the whole page rather than being contained to that section.
+* **A charting library.** The fourteen-day chart is about forty lines of markup driven by
+  the array the API returns. One series of fourteen values did not justify a dependency,
+  and the only non-obvious parts — giving zero days a visible stub, and labelling every
+  third date so labels do not collide — are things a library would have needed
+  configuring to do anyway.

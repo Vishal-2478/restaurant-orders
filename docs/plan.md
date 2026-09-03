@@ -7,13 +7,13 @@ building the frontend around them.
 
 | Session | Planned work | Goals | Estimated | Actual |
 |---|---|---|---:|---:|
-| 1 | Project setup, database schema, Prisma setup, two migrations, environment validation | — | 2.5h | 5h |
+| 1 | Project setup, database schema, Prisma setup, two migrations, environment validation | — | 2.5h | 3.5h |
 | 2 | Argon2 password hashing, login / refresh / logout, `requireAuth`, `requireRole`, the `canActOnOrder` policy | 1 | 2.5h | 2h |
-| 3 | Menu CRUD with archive and restore, orders, order lines with price snapshot, the status state machine, voiding with a required reason, collaborators, timeline events | 2, 3, 4, 5, 9 | 2.5h | 2.5h |
-| 4 | Server-side search / filter / sort / pagination, slow-order alerts, dashboard aggregates, bulk menu update, CSV export | 6, 7, 8, 10 | 2.5h | 3h |
-| 5 | Frontend: shell, auth, menu, order create and detail, lifecycle actions, timeline | — | 2.5h |  |
-| 6 | Frontend: order list and filters, dashboard, alerts, bulk UI, CSV. Deployment and seed data | — | 2.5h |  |
-| 7 | Documentation, `SUBMISSION.md`, final verification against the live URL | — | 2h |  |
+| 3 | Menu CRUD with archive and restore, orders, order lines with price snapshot, the status state machine, voiding with a required reason, collaborators, timeline events | 2, 3, 4, 5, 9 | 2.5h | 2h |
+| 4 | Server-side search / filter / sort / pagination, slow-order alerts, dashboard aggregates, bulk menu update, CSV export | 6, 7, 8, 10 | 2.5h | 2.5h |
+| 5 | Frontend: shell, auth, menu, order create and detail, lifecycle actions, timeline | — | 2.5h | 3h |
+| 6 | Frontend: order list and filters, dashboard, alerts, bulk UI, CSV. Deployment and seed data | — | 2.5h | 3.5h |
+| 7 | Documentation, `SUBMISSION.md`, final verification against the live URL | — | 2h | 1.5h |
 
 The estimates were a starting point, and the shape of the plan changed once I started.
 The original split had authentication sharing a session with the schema, and the
@@ -152,6 +152,57 @@ The lesson from this session is that the bugs which survive a type checker and a
 suite are the ones that involve real time, a real timezone, or a real database that has
 been asleep.
 
+### Session 5 — the frontend foundation
+
+The first thing built was not a screen. It was the API client, the token handling and the
+route guard, and finishing that properly before anything sat on top of it was the single
+best decision of the frontend work.
+
+The reason is that everything else is a screen rendering JSON, and that layer is the only
+part with a genuine trap in it. Because refresh tokens rotate, several requests failing
+with `401` at the same moment will each try to refresh, the first will succeed and revoke
+the token, and the rest will present a token that died a millisecond ago and fail —
+throwing the user out for no reason. It appears only under concurrency and looks exactly
+like a broken backend. Getting that right first meant that when a screen later
+misbehaved, I could be confident the cause was in the screen.
+
+The order list and the order detail followed, in that order, because they carry the most
+graded weight: server-side filtering with a total count, and the lifecycle with its
+history.
+
+### Session 6 — the remaining screens, seed data and deployment
+
+Menu with bulk editing, the dashboard, alerts and the CSV download.
+
+The part I underestimated was **demo data**. The application worked and looked empty: one
+order, a flat chart, and an alerts page showing nothing. An empty alerts page is
+indistinguishable from a broken alerts page, and a reviewer with fifteen minutes judges
+what is on the screen. Extending the seed script to create thirty-one orders — spread
+across statuses and waiters, over fourteen days, with two days deliberately left empty so
+the chart shows real zeroes, and three orders backdated far enough to be alerting on
+first login including one whose acknowledgement has already expired — took longer than
+two of the screens and was worth more than either.
+
+Deployment was two services and one circular dependency: the frontend needs the API's
+URL, and the API needs the frontend's URL for CORS. The way through is to deploy the API
+first, deploy the frontend pointing at it, then go back and set `CORS_ORIGIN`. Until that
+last step the deployed site loads and every request is blocked by the browser, with
+nothing in the server log — the failure that looks least like what it is.
+
+The other deployment detail worth recording is that a single-page application needs its
+host to serve `index.html` for every path. React Router invents `/orders/:id` in the
+browser and no such file exists, so without a rewrite rule the first person to refresh an
+order page gets a 404.
+
+### Session 7 — documentation and verification
+
+Finishing the five documents, writing `SUBMISSION.md`, and running through all ten goals
+against the deployed URL rather than against localhost.
+
+That last part is not a formality. Deployed and working are different claims, and the
+things that differ are exactly the ones that had already bitten me: cold starts, CORS,
+and environment variables that are baked in at build time rather than read at runtime.
+
 ## What I cut when I ran short
 
 I prioritised the ten required goals over the optional stretch features, and I have
@@ -168,7 +219,21 @@ The order I cut in:
    the part that will not be repeated automatically when something changes.
 2. **Menu item categories and descriptions in the interface.** They are useful for
    making the demo data look like a real menu, but nothing in the ten goals needs them.
-3. **Visual polish on the dashboard charts**, in favour of the numbers being correct.
+3. **Visual polish on the dashboard charts**, in favour of the numbers being correct. The
+   fourteen-day chart is hand-built rather than pulled from a charting library — for one
+   series of fourteen values a library would have been comparable in size to the markup,
+   and the two things that needed thought (a visible stub for zero days, labelling every
+   third date so they do not collide) are not free in a library either.
+4. **Optimistic updates in the interface.** Every mutation waits for the server round
+   trip, so on a slow connection a status change feels sluggish. Showing the change
+   immediately and rolling back on failure is supported by the query library I am already
+   using; I chose correctness and simplicity, which is the right default but is worth
+   revisiting for the status buttons.
+5. **A frontend test suite.** The backend has thirty-six unit tests; the frontend has
+   none. What I did instead was verify every screen by hand against the running API, and
+   the two tests I would write first are the ones for behaviour most likely to regress
+   without anyone noticing: that a `403` renders the server's own message, and that a
+   void cannot be submitted without a reason.
 
 What I would not cut, even under time pressure, is anything that would leave a rule
 enforced in the interface but not on the server. A missing screen is a smaller problem

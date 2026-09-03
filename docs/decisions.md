@@ -175,3 +175,105 @@
   Version 4 UUIDs solve that but are entirely random, so consecutive inserts land in unrelated places in the index and the database ends up writing to many different pages for what is logically one sequence of rows.
 
   Version 7 puts a millisecond timestamp in the leading bits. The values are still unique and still unguessable in the part that matters, but they sort chronologically — so rows created near each other in time sit near each other in the index, and ordering by id is approximately ordering by creation. Prisma 7 supports it directly with `@default(uuid(7))`, so it was a one-word choice rather than a piece of engineering.
+
+## Decision 13 — Where the browser keeps each token
+
+- **Chose:** the access token in a JavaScript variable, in memory only; the refresh token in `localStorage`.
+
+- **Rejected:** both in `localStorage`, and both in memory.
+
+- **Why:** These two tokens have opposite properties, so storing them the same way would be wrong for one of them.
+
+  The access token is a bearer credential: anything that can read it can act as the user for the next fifteen minutes, and there is nothing the server can do about it, because a JWT is verified by arithmetic and is not on any list to be removed from. Kept in `localStorage` it is readable by any script on the page at any time in the future — so a cross-site scripting bug found next month can read a token stored today. Kept in a module variable, an attacker's code has to be running in the same JavaScript context at the same moment. That is a meaningfully smaller window.
+
+  The refresh token is the opposite. It carries no information, it can only be exchanged for a new pair, and it is revocable: a hashed copy is a row in the database. It also rotates on every use, so a stolen one works exactly once and its use logs the real owner out. Keeping it in `localStorage` is an accepted risk because it is the traceable, cancellable one — and the alternative is signing the user out on every page refresh, which is unusable.
+
+  So the rule is: the credential that cannot be revoked is kept where it is hardest to reach, and the one that can be revoked is the one that persists.
+
+  The cost is that a page reload destroys the access token. The application handles that by exchanging the stored refresh token for a new pair on boot, before rendering anything — which is why there are three session states rather than two, and why the route guard has to distinguish "still loading" from "signed out".
+
+## Decision 14 — Concurrent token refreshes share one request
+
+- **Chose:** a single in-flight refresh promise that every caller awaits.
+
+- **Rejected:** letting each failed request refresh independently.
+
+- **Why:** This one exists entirely because refresh tokens rotate, and it is the subtlest bug in the frontend.
+
+  A screen like the order detail fires three requests at once. If the access token has just expired, all three come back `401`, and the obvious implementation has all three call `/api/auth/refresh`. The first succeeds — and in succeeding, revokes the token. The other two then present a token that died a millisecond earlier and are rejected, which clears the session and throws the user out to the login screen for no reason at all.
+
+  It only happens under concurrency, only sometimes, and looks exactly like a broken backend. The fix is that the first caller starts the refresh and stores the promise; everyone else awaits the same promise; the slot is cleared when it settles.
+
+  What I take from it is that rotation is not free. It buys something real — a stolen refresh token becomes visible instead of silent — and the price is paid in the client, in a place that has nothing obviously to do with security.
+
+## Decision 15 — Server data is a cache, not component state
+
+- **Chose:** TanStack Query for everything that comes from the API; `useState` only for things the browser owns.
+
+- **Rejected:** `useEffect` plus `useState` in each component.
+
+- **Why:** The distinction it forced is the useful part. Which dialog is open, what is typed in a field, which chart bar is hovered — the browser owns those, and `useState` is right. The orders are not mine: they are in Postgres, another user may be changing them, and my copy can be stale. That is a cache, and treating a cache like state is where the pain comes from.
+
+  Doing it by hand means writing loading flags, error flags, refetch-after-mutation, deduplication of simultaneous identical requests, and cache invalidation, in every component, slightly differently each time. Query keys replace all of it with one idea: `['order', id]` names a cache entry, and anything that changes that order can say "this is stale" without knowing which components are showing it.
+
+  Two concrete payoffs. Every order mutation invalidates the order, the order lists and the alerts in three lines. And the alerts badge in the navigation and the alerts page use the same key, so they are deduplicated into a single poll and cannot disagree with each other.
+
+  Mutations refetch rather than patching the cache, because the server computes things the client cannot — the recalculated total, the new timeline event with its server timestamp. Patching by hand would mean reimplementing server logic in the browser, which is the same mistake as filtering in the browser.
+
+  The trade-off is a dependency and a mental model to learn. For an application this size that is worth it; for a single screen with one fetch it would not be.
+
+## Decision 16 — Order filters live in the URL
+
+- **Chose:** every filter, sort and page is a query-string parameter, read with `useSearchParams`.
+
+- **Rejected:** keeping them in component state.
+
+- **Why:** State would have been slightly less code. The URL gives three things it cannot.
+
+  The back button works, because each filter change is a history entry. A filtered view is a link — `?status=PLACED&mineOnly=false` can be pasted to a colleague and they see the same thing. And a page refresh keeps your place instead of silently resetting to the default view, which matters on a screen someone leaves open during a service.
+
+  There is a fourth benefit I did not plan and now consider the most important. The query string is part of the TanStack Query cache key, so changing a filter changes the key, which means a different cache entry, which means a new request to the server. Goal 6 says not to load every order into the browser and filter there — with this design that is not a rule someone has to remember, it is the only thing the code is capable of doing.
+
+  The cost is that every value arrives as a string and has to be parsed and defaulted on the way in.
+
+## Decision 17 — The client keeps its own copy of the status transition table
+
+- **Chose:** duplicate the transition table in the frontend, and use it only to decide which buttons to render.
+
+- **Rejected:** asking the server which transitions are legal; or rendering every button and letting the server refuse.
+
+- **Why:** Duplicating a rule is normally a mistake, so this one needs saying out loud: the server's copy is the **rule**, and it re-checks every request. The client's copy is a **hint** used to avoid offering an action that will be refused. If they ever drift, the server wins and the user sees the server's own explanation — the behaviour degrades, it does not become wrong.
+
+  The alternative of asking the server is a network round trip to decide whether to draw a button, for an answer that is a pure function of a value the client already has. Rendering every button and letting the server refuse would work, but it means a screen that regularly offers actions that fail, which trains people to ignore error messages.
+
+  The honest improvement — which I would make with more time — is for the order response to include an `allowedTransitions` array computed by the server. That removes the duplication without adding a round trip, because the information rides along with data the client was fetching anyway.
+
+## Decision 18 — Alerts are polled, not pushed
+
+- **Chose:** the alerts query refetches every twenty seconds; the navigation badge shares that query.
+
+- **Rejected:** WebSockets or server-sent events.
+
+- **Why:** A slow-order count that is up to twenty seconds out of date changes nothing about how anyone works — the threshold it is reporting on is fifteen minutes.
+
+  Against that, a persistent connection has to be kept alive, reconnected when it drops, and debugged when it dies silently; it needs the hosting tier to support long-lived connections, which a free tier may restart at any time; and it would be a second mechanism to maintain alongside the request/response path everything else uses.
+
+  There is also a design consistency argument. The alerts feature already avoids a background job by deriving alert state at query time. Adding a push channel would reintroduce exactly the kind of always-running component that decision 3 was written to remove.
+
+  Because the badge and the alerts page share one query key, the polling costs one request every twenty seconds regardless of how many components display it.
+
+  If this were a kitchen display mounted on a wall, where seconds matter and the screen is never touched, I would revisit it.
+
+## Decision 19 — The fourteen-day chart is hand-built
+
+- **Chose:** about forty lines of markup driven by the array the API returns.
+
+- **Rejected:** Recharts, or any charting library.
+
+- **Why:** It is one series of fourteen values on a bar chart. Configuring a library to draw that would have been comparable in size to drawing it, and would have added a dependency and bundle weight to a frontend that otherwise ships very little.
+
+  The two things that actually needed thought are not things a library gives you for free either. Days with no orders get a two-pixel stub rather than nothing, so a zero reads as "nothing happened here" instead of as a missing bar. And only every third date is labelled, because fourteen labels in that width collide.
+
+  The reason those matter at all is upstream: the API always returns fourteen entries, including days with zero, because the query generates the date series and left joins counts onto it. If quiet days were dropped the chart would draw Monday next to Wednesday and a slow Tuesday would look like a Tuesday that never happened.
+
+  Where I would use a library is anything with multiple series, axes that need real scales, or interactive zooming. None of that is here.
