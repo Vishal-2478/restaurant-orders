@@ -1,9 +1,11 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
-import { RequireAuth } from '../src/auth/RequireAuth';
+import { RequireAuth } from './auth/RequireAuth';
 import { Layout } from './components/Layout';
 import { LoginPage } from './pages/LoginPage';
 import { OrdersPage } from './pages/OrdersPage';
 import { NewOrderPage } from './pages/NewOrderPage';
+import { OrderDetailPage } from './pages/OrderDetailPage';
+import { MenuPage } from './pages/MenuPage';
 
 function Placeholder({ title }: { title: string }) {
   return (
@@ -21,13 +23,16 @@ export default function App() {
       <Route element={<RequireAuth />}>
         <Route element={<Layout />}>
           <Route path="/" element={<Navigate to="/orders" replace />} />
-          <Route path="/orders" element={<Placeholder title="Orders" />} />
+
+          {/* "/orders/new" must sit ABOVE "/orders/:id", or "new" is read as an id. */}
+          <Route path="/orders" element={<OrdersPage />} />
+          <Route path="/orders/new" element={<NewOrderPage />} />
+          <Route path="/orders/:id" element={<OrderDetailPage />} />
+
           <Route path="/menu" element={<Placeholder title="Menu" />} />
           <Route path="/dashboard" element={<Placeholder title="Dashboard" />} />
           <Route path="/alerts" element={<Placeholder title="Alerts" />} />
-          <Route path="/orders" element={<OrdersPage />} />
-          <Route path="/orders/new" element={<NewOrderPage />} />
-          <Route path="/orders/:id" element={<Placeholder title="Order detail" />} />
+          <Route path="/menu" element={<MenuPage />} />
         </Route>
       </Route>
 
