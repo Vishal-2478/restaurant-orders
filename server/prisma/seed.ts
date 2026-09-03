@@ -7,7 +7,7 @@ import type { OrderStatus } from '../src/generated/prisma/client';
 const DEMO_PASSWORD = 'Password123!';
 
 const STAFF = [
-    { email: 'manager@restaurant.test', name: 'Priya Menon', role: 'MANAGER' as const },
+    { email: 'manager@restaurant.test', name: 'Vishal Mali', role: 'MANAGER' as const },
     { email: 'waiter.a@restaurant.test', name: 'Arjun Rao', role: 'WAITER' as const },
     { email: 'waiter.b@restaurant.test', name: 'Beatrice Kim', role: 'WAITER' as const },
 ];
