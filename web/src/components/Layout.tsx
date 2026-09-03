@@ -1,5 +1,7 @@
 import { NavLink, Outlet } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '../auth/AuthContext';
+import { ALERTS_POLL_MS, ALERTS_QUERY_KEY, fetchAlerts } from '../lib/alerts';
 
 const linkBase =
     'rounded-md px-3 py-2 text-sm font-medium transition-colors';
@@ -13,6 +15,17 @@ function navClass({ isActive }: { isActive: boolean }) {
 export function Layout() {
     const { user, isManager, logout } = useAuth();
 
+    // Goal 10's nav badge. Polls rather than holding a websocket open — a count
+    // that is up to twenty seconds stale is harmless, and this query is shared
+    // with the alerts page, so both stay in step without a second request.
+    const alertsQuery = useQuery({
+        queryKey: ALERTS_QUERY_KEY,
+        queryFn: fetchAlerts,
+        refetchInterval: ALERTS_POLL_MS,
+    });
+
+    const alertCount = alertsQuery.data?.count ?? 0;
+
     return (
         <div className="min-h-screen">
             <header className="border-b border-slate-200 bg-white">
@@ -25,7 +38,14 @@ export function Layout() {
                         <NavLink to="/orders" className={navClass}>Orders</NavLink>
                         <NavLink to="/menu" className={navClass}>Menu</NavLink>
                         <NavLink to="/dashboard" className={navClass}>Dashboard</NavLink>
-                        <NavLink to="/alerts" className={navClass}>Alerts</NavLink>
+                        <NavLink to="/alerts" className={navClass}>
+                            Alerts
+                            {alertCount > 0 && (
+                                <span className="ml-1.5 inline-flex min-w-5 items-center justify-center rounded-full bg-red-600 px-1.5 py-0.5 text-xs font-semibold text-white">
+                                    {alertCount}
+                                </span>
+                            )}
+                        </NavLink>
                     </nav>
 
                     <div className="ml-auto flex items-center gap-3 text-sm">

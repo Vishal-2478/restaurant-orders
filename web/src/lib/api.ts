@@ -174,6 +174,36 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
     return (await response.json()) as T;
 }
 
+/**
+ * Downloads a file from an authenticated endpoint.
+ *
+ * A plain <a href> cannot be used here: the browser would follow it without an
+ * Authorization header and get a 401. So the file is fetched like any other
+ * request, turned into a blob, and handed to a temporary link that is clicked
+ * programmatically and immediately discarded.
+ */
+export async function downloadFile(path: string, filename: string): Promise<void> {
+    const response = await apiRequest(path);
+
+    if (!response.ok) {
+        throw await toApiError(response);
+    }
+
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+
+    // Releases the memory the blob was holding. Without this the file stays in
+    // memory until the tab is closed.
+    URL.revokeObjectURL(url);
+}
+
 /** Login is separate: it must not attach a token, and must not retry on 401. */
 export async function loginRequest(email: string, password: string): Promise<AuthResponse> {
     const response = await fetch(`${BASE_URL}/api/auth/login`, {

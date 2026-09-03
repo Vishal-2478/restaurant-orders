@@ -127,3 +127,29 @@ export type BulkResult = {
     updated: number;
     failed: number;
 };
+
+
+export type DashboardData = {
+    summary: {
+        openOrders: number;
+        placedToday: number;
+        servedToday: number;
+        revenueTodayCents: number;
+    };
+    byStatus: { status: OrderStatus; count: number }[];
+    byWaiter: { id: string; name: string; ordersToday: number; servedToday: number }[];
+    servedPerDay: { day: string; served: number }[];
+};
+
+export type SlowOrderAlert = {
+    orderId: string;
+    tableNumber: number;
+    status: OrderStatus;
+    placedAt: string;
+    minutesOpen: number;
+    primaryWaiter: { id: string; name: string };
+    lastAcknowledgedAt: string | null;
+    reArmed: boolean;
+};
+
+export type AlertsResponse = { alerts: SlowOrderAlert[]; count: number };

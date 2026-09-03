@@ -3,6 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { ORDER_STATUSES, STATUS_LABELS, StatusBadge } from '../components/StatusBadge';
 import { buildQuery, fetchOrders, fetchWaiters } from '../lib/queries';
+import { downloadFile } from '../lib/api';
 import { formatDateTime, formatMoney } from '../lib/format';
 import type { OrderStatus } from '../lib/types';
 
@@ -99,12 +100,27 @@ export function OrdersPage() {
         <div className="space-y-4">
             <div className="flex items-center justify-between">
                 <h1 className="text-lg font-semibold tracking-tight">Orders</h1>
-                <Link
-                    to="/orders/new"
-                    className="rounded-md bg-brand-600 px-3 py-2 text-sm font-medium text-white hover:bg-brand-700"
-                >
-                    New order
-                </Link>
+                <div className="flex items-center gap-2">
+                    {/* Goal 7: CSV of today's orders. Fetched with the auth header and
+              saved as a blob, because a plain link cannot send one. */}
+                    <button
+                        type="button"
+                        onClick={() => {
+                            const today = new Date().toISOString().slice(0, 10);
+                            void downloadFile('/api/orders/export.csv', `orders-${today}.csv`);
+                        }}
+                        className="rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
+                    >
+                        Export today (CSV)
+                    </button>
+
+                    <Link
+                        to="/orders/new"
+                        className="rounded-md bg-brand-600 px-3 py-2 text-sm font-medium text-white hover:bg-brand-700"
+                    >
+                        New order
+                    </Link>
+                </div>
             </div>
 
             {/* ---------------------------------------------------------- filters */}
@@ -169,8 +185,8 @@ export function OrdersPage() {
                                 type="button"
                                 onClick={() => toggleStatus(status)}
                                 className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${active
-                                    ? 'bg-brand-600 text-white'
-                                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                        ? 'bg-brand-600 text-white'
+                                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                                     }`}
                             >
                                 {STATUS_LABELS[status]}
