@@ -277,3 +277,19 @@
   The reason those matter at all is upstream: the API always returns fourteen entries, including days with zero, because the query generates the date series and left joins counts onto it. If quiet days were dropped the chart would draw Monday next to Wednesday and a slow Tuesday would look like a Tuesday that never happened.
 
   Where I would use a library is anything with multiple series, axes that need real scales, or interactive zooming. None of that is here.
+
+## Decision 20 — The default order filter depends on the role (reversed)
+
+- **Originally chose:** *Only my orders* ticked by default for everybody. A waiter's working list is their own orders, and the checkbox is right there if they want to see the rest.
+
+- **Reversed to:** the default is now derived from the role — ticked for a waiter, unticked for a manager.
+
+- **Why the first version was wrong:** it was correct and useless. Goal 1 says a manager "can see and act on every order", so every order *is* the manager's view of the restaurant; a manager typically owns none, because managers do not wait tables. So the first screen a manager saw after signing in was an empty list with a "no orders match these filters" message. Nothing was broken, and the fix was one click, but a blank screen thirty seconds into someone's first look at the system reads as a broken deployment, not as a filter doing its job.
+
+  I found it the way it should be found — by signing out and signing in as each seeded account in turn to check what the first screen actually looks like, rather than by testing the filter I had just written and moving on.
+
+- **What it cost:** the default is now conditional rather than constant, which is a small amount of extra state to hold in your head when reading the component. The comment carries the reason so the next person does not "simplify" it back.
+
+- **What I rejected:** seeding a couple of orders under the manager's name so the original default had something to show. That fixes the screenshot and not the problem — a real restaurant's manager still owns nothing, so the empty page would just move from my seed data to their first day.
+
+- **The general point:** a default is a product decision, not a technical one. Both versions of this line pass every test I could write for it. The difference only shows up when you ask what the person in front of the screen is actually there to do, and the answer turned out to be different for the two roles using the same page.

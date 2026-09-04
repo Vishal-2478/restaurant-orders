@@ -2,6 +2,7 @@ import { useMemo } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { ORDER_STATUSES, STATUS_LABELS, StatusBadge } from '../components/StatusBadge';
+import { useAuth } from '../auth/AuthContext';
 import { buildQuery, fetchOrders, fetchWaiters } from '../lib/queries';
 import { downloadFile } from '../lib/api';
 import { formatDateTime, formatMoney } from '../lib/format';
@@ -23,10 +24,22 @@ const PAGE_SIZE = 20;
  */
 export function OrdersPage() {
     const [searchParams, setSearchParams] = useSearchParams();
+    const { isManager } = useAuth();
 
-    // Default: only my orders. Decision 16 — waiters may view everything but the
-    // list they work from is theirs.
-    const mineOnly = (searchParams.get('mineOnly') ?? 'true') === 'true';
+    // Decision 20. The default depends on the role, because the two roles open
+    // this page looking for different things.
+    //
+    // A waiter's default is their own list — goal 5 asks for "one list of every
+    // order where they are the primary waiter or a collaborator", and that is the
+    // list they actually work from. They can untick it and see everything.
+    //
+    // A manager's default is every order, because goal 1 says a manager "can see
+    // and act on every order" — that IS the manager's view of the restaurant. The
+    // first version defaulted both roles to their own orders, which meant a
+    // manager who owns no orders landed on an empty page: technically correct and
+    // completely useless as a first screen.
+    const defaultMineOnly = isManager ? 'false' : 'true';
+    const mineOnly = (searchParams.get('mineOnly') ?? defaultMineOnly) === 'true';
     const includeArchived = searchParams.get('includeArchived') === 'true';
     const tableNumber = searchParams.get('tableNumber') ?? '';
     const waiterId = searchParams.get('waiterId') ?? '';
@@ -41,6 +54,7 @@ export function OrdersPage() {
     // request and the controls can never disagree about what is being filtered.
     const query = useMemo(() => {
         const statusList = searchParams.getAll('status');
+        const mine = (searchParams.get('mineOnly') ?? (isManager ? 'false' : 'true')) === 'true';
 
         return buildQuery({
             tableNumber: searchParams.get('tableNumber') || undefined,
@@ -48,14 +62,14 @@ export function OrdersPage() {
             waiterId: searchParams.get('waiterId') || undefined,
             placedFrom: searchParams.get('placedFrom') || undefined,
             placedTo: searchParams.get('placedTo') || undefined,
-            mineOnly: (searchParams.get('mineOnly') ?? 'true') === 'true' ? 'true' : undefined,
+            mineOnly: mine ? 'true' : undefined,
             includeArchived: searchParams.get('includeArchived') === 'true' ? 'true' : undefined,
             sortBy: searchParams.get('sortBy') ?? 'placedAt',
             sortDirection: searchParams.get('sortDirection') ?? 'desc',
             page: Number(searchParams.get('page') ?? '1'),
             pageSize: PAGE_SIZE,
         });
-    }, [searchParams]);
+    }, [searchParams, isManager]);
 
     const ordersQuery = useQuery({
         queryKey: ['orders', query],
